@@ -9,12 +9,57 @@ class MKSServo:
         self.dev = dev
 
         self.COMMAND_MAP = {
-            "1": ("Motor Enable/Disable", 0xF3,
-                  "Format: 01 (Enable) or 00 (Disable)"),
+            "1": ("Absolute Position (mm)", 0xF5,
+                  "Format: [Speed(0-100%)] [Accel(0-100%)] [Distance(mm)]\n"
+                  "Distance: mm from zero point (0 or above)\n"
+                  "  Ball screw: 3.75mm per turn\n"
+                  "Example: 20 10 3.75   (move to 3.75mm = 1 turn)\n"
+                  "Example: 50 10 15     (move to 15mm = 4 turns)"),
             "2": ("Speed Control Mode", 0xF6,
                   "Format: [CW/CCW] [Speed(0-100%)] [Accel(0-100%)]\nExample: CW 50 10"),
             "3": ("Read Motor Operating Status", 0xF1,
-                  None)
+                  None),
+            "8": ("Settings", None, None),
+        }
+
+        self.SETTINGS_MAP = {
+            "1": ("Motor Enable/Disable", 0xF3, {
+                "0": ("Disable (Loose Shaft)", 0x00),
+                "1": ("Enable (Lock Shaft)", 0x01),
+            }),
+            "2": ("Set Zero Point (current position = 0)", 0x92, None),
+            "3": ("Set Work Mode [Default: SR_vFOC]", 0x82, {
+                "0": ("CR_OPEN  (Pulse Open-Loop)", 0x00),
+                "1": ("CR_CLOSE (Pulse Closed-Loop)", 0x01),
+                "2": ("CR_vFOC  (Pulse FOC)", 0x02),
+                "3": ("SR_OPEN  (Bus Open-Loop)", 0x03),
+                "4": ("SR_CLOSE (Bus Closed-Loop)", 0x04),
+                "5": ("SR_vFOC  (Bus FOC) *", 0x05),
+            }),
+            "4": ("Set Working Current [Default: 42D=1600mA, 57D=3200mA]", 0x83, None),
+            "5": ("Set Subdivisions [Default: 16]", 0x84, None),
+            "6": ("Set CAN Bit Rate [Default: 500K]", 0x8A, {
+                "0": ("125K", 0x00),
+                "1": ("250K", 0x01),
+                "2": ("500K *", 0x02),
+                "3": ("1M", 0x03),
+            }),
+            "7": ("Set Slave Response [Default: Full Response]", 0x8C, {
+                "0": ("Disabled (XX=0, YY=0)", [0x00, 0x00]),
+                "1": ("No Active (XX=1, YY=0)", [0x01, 0x00]),
+                "2": ("Full Response (XX=1, YY=1) *", [0x01, 0x01]),
+            }),
+            "8": ("Set Motor Direction [Default: CW]", 0x86, {
+                "0": ("CW *", 0x00),
+                "1": ("CCW", 0x01),
+            }),
+            "9": ("Set En Pin Level [Default: Active Low]", 0x85, {
+                "0": ("Active Low *", 0x00),
+                "1": ("Active High", 0x01),
+                "2": ("Always Enabled (Hold)", 0x02),
+            }),
+            "10": ("Set Homing Speed [Default: 60 RPM]", None, None),
+            "11": ("Run Homing", None, None),
         }
 
     def send_can_message(self, can_id, data, dlc_value):
@@ -96,7 +141,15 @@ class MKSServo:
         else:
             print(f"[TIMEOUT] No Response for {cmd_name}")
 
-    def wait_response(self, timeout=30):
+    STATUS_MAP = {
+        0x00: "Failed",
+        0x01: "Running...",
+        0x02: "Run Complete",
+        0x03: "Stopped by Limit Switch",
+        0x05: "Sync Data Received",
+    }
+
+    def wait_response(self, timeout=5):
         print("[WAIT] Waiting for Motor Response...")
         start = time.time()
         while time.time() - start < timeout:
@@ -104,8 +157,10 @@ class MKSServo:
             if len(response) == 18:
                 cmd = response[8]
                 status = response[9]
-                print(f"[RECV] CMD: 0x{cmd:02X}, Status: 0x{status:02X}")
-                return status
+                status_text = self.STATUS_MAP.get(status, f"Unknown (0x{status:02X})")
+                print(f"[RECV] CMD: 0x{cmd:02X}, Status: {status_text}")
+                if status != 0x01:  # 0x01 = still running, keep waiting
+                    return status
             time.sleep(0.1)
         print("[TIMEOUT] No Response Received.")
         return None
@@ -114,7 +169,7 @@ class MKSServo:
     def setup_motor(self, can_id):
         setup_commands = [
             ("Set SR_vFOC Mode", 0x82, [0x05]),
-            ("Set Slave Response (XX=1, YY=0)", 0x8C, [0x01, 0x00]),
+            ("Set Slave Response (XX=1, YY=1)", 0x8C, [0x01, 0x01]),
             ("Set CAN Rate 1M", 0x8A, [0x03]),
         ]
 
@@ -139,6 +194,38 @@ class MKSServo:
         
         return all_ok
 
+    def home_motor(self, can_id, home_speed=60):
+        print(f"\n{'='*45}")
+        print("[HOME] Starting Homing Sequence...")
+        print(f"{'='*45}")
+
+        # 1. Set homing params (90H)
+        #    homeTrig=0x00 (Low level), homeDir=0x01 (CCW),
+        #    homeSpeed (uint16_t), EndLimit=0x00 (disable limit),
+        #    hm_mode=0x00 (origin switch homing)
+        #
+        #    NOTE: Dir is INVERTED on this motor setup.
+        #    Manual says 0x00=CW, 0x01=CCW, but actual behavior is opposite.
+        #    homeDir=0x01 actually moves CW (toward the limit switch).
+        speed_hi = (home_speed >> 8) & 0xFF
+        speed_lo = home_speed & 0xFF
+        self.send_motor(can_id, 0x90, 0x00, 0x01, speed_hi, speed_lo, 0x00, 0x00)
+
+        # 2. Execute homing (91H)
+        self.send_motor(can_id, 0x91)
+
+        # 3. Wait for homing to complete
+        # NOTE: Dir inverted — homeDir=0x01 actually moves CW on this motor
+        print("[HOME] Moving to find origin switch...")
+        status = self.wait_response(timeout=30)
+
+        if status == 0x02:
+            print("[HOME] Homing Complete. Zero point set.")
+        elif status == 0x00:
+            print("[HOME] Homing Failed. Check switch wiring.")
+        else:
+            print(f"[HOME] Homing ended with status: 0x{status:02X}" if status else "[HOME] Homing Timeout.")
+
     def parse_speed_control_data(self, user_input):
 
         try:
@@ -148,6 +235,10 @@ class MKSServo:
                 return None
             
             # 1. Direction
+            #    NOTE: Dir is INVERTED on this motor setup.
+            #    Manual says dir=0 is CCW, dir=1 is CW,
+            #    but actual behavior is opposite.
+            #    So user input CW/CCW is swapped here to match reality.
             direction_str = parts[0].upper()
             if direction_str not in ("CW", "CCW"):
                 print("[INPUT] Direction Must be CW or CCW.")
@@ -178,6 +269,143 @@ class MKSServo:
         except ValueError:
             print("[INPUT] Incorrect Number Format")
             return None
+
+    # Ball screw: 3.75mm per revolution
+    MM_PER_TURN = 3.75
+    ENCODER_PER_TURN = 16384
+
+    def parse_abs_coordinate_data(self, user_input):
+
+        try:
+            parts = user_input.split()
+            if len(parts) < 3:
+                print("[INPUT] Need Speed, Accel and Distance(mm).")
+                return None
+
+            # 1. Speed (0~100% -> 0~3000 RPM)
+            speed_pct = float(parts[0])
+            if not (0 <= speed_pct <= 100):
+                print("[INPUT] Speed Range: 0% ~ 100% (Max. 3000 RPM)")
+                return None
+            real_speed = int(3000 * (speed_pct / 100))
+
+            # 2. Accel (0~100% -> 0~255)
+            accel_pct = float(parts[1])
+            if not (0 <= accel_pct <= 100):
+                print("[INPUT] Accel Range: 0% ~ 100%")
+                return None
+            real_accel = int(255 * (accel_pct / 100))
+
+            # 3. mm -> Turns -> Coordinate
+            distance_mm = float(parts[2])
+            if distance_mm < 0:
+                print("[INPUT] Distance must be 0 or above.")
+                return None
+            turns = distance_mm / self.MM_PER_TURN
+            coord = int(turns * self.ENCODER_PER_TURN)
+            if coord > 8388607:
+                max_mm = 8388607 / self.ENCODER_PER_TURN * self.MM_PER_TURN
+                print(f"[INPUT] Distance out of range (max ~{max_mm:.1f}mm)")
+                return None
+
+            # 4. Byte Construction per manual 11.4.1
+            # Byte2-3: speed (uint16_t big-endian)
+            # Byte4: acc (uint8_t)
+            # Byte5-7: absAxis (int24_t big-endian)
+            speed_hi = (real_speed >> 8) & 0xFF
+            speed_lo = real_speed & 0xFF
+
+            coord_bytes = coord & 0xFFFFFF
+
+            coord_hi = (coord_bytes >> 16) & 0xFF
+            coord_mid = (coord_bytes >> 8) & 0xFF
+            coord_lo = coord_bytes & 0xFF
+
+            print(f"  -> Speed: {real_speed} RPM, Accel: {real_accel}, Dist: {distance_mm}mm ({turns:.2f} turns), Coord: {coord} (0x{coord_bytes:06X})")
+            return [speed_hi, speed_lo, real_accel, coord_hi, coord_mid, coord_lo]
+
+        except ValueError:
+            print("[INPUT] Incorrect Number Format")
+            return None
+
+    def settings_menu(self, can_id, safe_input):
+        while True:
+            print(f'\n{"-"*45}\n[ Settings Menu ]\n{"-"*45}')
+            for key, (name, _, _) in self.SETTINGS_MAP.items():
+                print(f"  {key}. {name}")
+            print(f"  0. Back to Main Menu")
+
+            choice = safe_input(">> Choose Setting: ")
+            if choice == "0":
+                return
+
+            if choice not in self.SETTINGS_MAP:
+                print("[INPUT] Invalid choice.")
+                continue
+
+            name, cmd_code, options = self.SETTINGS_MAP[choice]
+            print(f"\n  [{name}]")
+
+            # Special: Set Zero Point (no data needed)
+            if choice == "2":
+                self.send_motor(can_id, 0x92)
+                continue
+
+            # Special: Homing Speed
+            if choice == "10":
+                rpm_raw = safe_input(">> Enter Homing Speed (RPM, default 60): ")
+                if not rpm_raw:
+                    rpm_raw = "60"
+                try:
+                    self.homing_speed = int(rpm_raw)
+                    print(f"[OK] Homing speed set to {self.homing_speed} RPM")
+                except ValueError:
+                    print("[INPUT] Invalid number.")
+                continue
+
+            # Special: Run Homing
+            if choice == "11":
+                speed = getattr(self, 'homing_speed', 60)
+                self.home_motor(can_id, home_speed=speed)
+                continue
+
+            # Options submenu
+            if isinstance(options, dict):
+                print("    (* = default)")
+                for k, (desc, _) in options.items():
+                    print(f"    {k}. {desc}")
+                sub = safe_input(">> Choose Option: ")
+                if sub not in options:
+                    print("[INPUT] Invalid option. Returning to Settings Menu.")
+                    continue
+                _, value = options[sub]
+                if isinstance(value, list):
+                    self.send_motor(can_id, cmd_code, *value)
+                else:
+                    self.send_motor(can_id, cmd_code, value)
+
+            # Direct value input
+            else:
+                if cmd_code == 0x83:
+                    val_raw = safe_input(">> Enter Current (mA, e.g. 1600): ")
+                    try:
+                        ma = int(val_raw)
+                        if not (0 <= ma <= 5200):
+                            print("[INPUT] Current Range: 0 ~ 5200 mA")
+                            continue
+                        self.send_motor(can_id, cmd_code, (ma >> 8) & 0xFF, ma & 0xFF)
+                    except ValueError:
+                        print("[INPUT] Invalid number. Returning to Settings Menu.")
+                elif cmd_code == 0x84:
+                    val_raw = safe_input(">> Enter Subdivisions (1-256, e.g. 16): ")
+                    try:
+                        subdiv = int(val_raw)
+                        if not (1 <= subdiv <= 256):
+                            print("[INPUT] Subdivisions Range: 1 ~ 256")
+                            continue
+                        self.send_motor(can_id, cmd_code, subdiv)
+                    except ValueError:
+                        print("[INPUT] Invalid number. Returning to Settings Menu.")
 
     def interactive_menu(self):
         
@@ -236,6 +464,10 @@ class MKSServo:
                     self.setup_motor(id_input)
                     continue
 
+                if choice == "8":
+                    self.settings_menu(id_input, safe_input)
+                    continue
+
                 if choice not in self.COMMAND_MAP:
                     print("[INPUT] Wrong Number. Re-Choose.")
                     continue
@@ -249,7 +481,12 @@ class MKSServo:
                     print(f"--- Format ---\n{cmd_format}")
                     d_raw = safe_input(">> Enter Data: ")
                     if d_raw:
-                        if choice == "2":
+                        if choice == "1":
+                            converted = self.parse_abs_coordinate_data(d_raw)
+                            if converted is None:
+                                continue
+                            data_values = converted
+                        elif choice == "2":
                             converted = self.parse_speed_control_data(d_raw)
                             if converted is None:
                                 continue
@@ -289,6 +526,11 @@ if __name__ == "__main__":
         dev.setTimeouts(100, 100)
         
         motor = MKSServo(dev)
+
+        CAN_ID = 0x01
+        motor.setup_motor(CAN_ID)
+        motor.home_motor(CAN_ID)
+
         motor.interactive_menu()
     
     except Exception as e:
