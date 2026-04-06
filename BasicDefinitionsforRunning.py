@@ -7,18 +7,17 @@ class MKSServo:
 
     def __init__(self, dev):
         self.dev = dev
+        self._retry_after_limit = False
 
         self.COMMAND_MAP = {
             "1": ("Absolute Position (mm)", 0xF5,
                   "Format: [Speed(0-100%)] [Accel(0-100%)] [Distance(mm)]\n"
-                  "Distance: mm from zero point (0 or above)\n"
-                  "  Ball screw: 3.75mm per turn\n"
-                  "Example: 20 10 3.75   (move to 3.75mm = 1 turn)\n"
-                  "Example: 50 10 15     (move to 15mm = 4 turns)"),
+                  "Distance: mm from zero point (0 to 450mm)\n"
+                  "Ball screw: 3.75mm per turn\n"
+                  "Example: 20 10 3.75\n"
+                  "Example: 50 10 15"),
             "2": ("Speed Control Mode", 0xF6,
                   "Format: [CW/CCW] [Speed(0-100%)] [Accel(0-100%)]\nExample: CW 50 10"),
-            "3": ("Read Motor Operating Status", 0xF1,
-                  None),
             "8": ("Settings", None, None),
         }
 
@@ -27,129 +26,152 @@ class MKSServo:
                 "0": ("Disable (Loose Shaft)", 0x00),
                 "1": ("Enable (Lock Shaft)", 0x01),
             }),
-            "2": ("Set Zero Point (current position = 0)", 0x92, None),
-            "3": ("Set Work Mode [Default: SR_vFOC]", 0x82, {
+            "2": ("Set Zero Point (Set Current Position = 0)", 0x92, None),
+            "3": ("Set Work Mode", 0x82, {
                 "0": ("CR_OPEN  (Pulse Open-Loop)", 0x00),
                 "1": ("CR_CLOSE (Pulse Closed-Loop)", 0x01),
                 "2": ("CR_vFOC  (Pulse FOC)", 0x02),
                 "3": ("SR_OPEN  (Bus Open-Loop)", 0x03),
                 "4": ("SR_CLOSE (Bus Closed-Loop)", 0x04),
-                "5": ("SR_vFOC  (Bus FOC) *", 0x05),
+                "5": ("SR_vFOC  (Bus FOC (Recommended))", 0x05),
             }),
             "4": ("Set Working Current [Default: 42D=1600mA, 57D=3200mA]", 0x83, None),
             "5": ("Set Subdivisions [Default: 16]", 0x84, None),
             "6": ("Set CAN Bit Rate [Default: 500K]", 0x8A, {
                 "0": ("125K", 0x00),
                 "1": ("250K", 0x01),
-                "2": ("500K *", 0x02),
-                "3": ("1M", 0x03),
+                "2": ("500K", 0x02),
+                "3": ("1M (Recommended)", 0x03),
             }),
             "7": ("Set Slave Response [Default: Full Response]", 0x8C, {
                 "0": ("Disabled (XX=0, YY=0)", [0x00, 0x00]),
                 "1": ("No Active (XX=1, YY=0)", [0x01, 0x00]),
-                "2": ("Full Response (XX=1, YY=1) *", [0x01, 0x01]),
+                "2": ("Full Response (XX=1, YY=1)", [0x01, 0x01]),
             }),
             "8": ("Set Motor Direction [Default: CW]", 0x86, {
-                "0": ("CW *", 0x00),
+                "0": ("CW", 0x00),
                 "1": ("CCW", 0x01),
             }),
             "9": ("Set En Pin Level [Default: Active Low]", 0x85, {
-                "0": ("Active Low *", 0x00),
+                "0": ("Active Low", 0x00),
                 "1": ("Active High", 0x01),
                 "2": ("Always Enabled (Hold)", 0x02),
             }),
             "10": ("Set Homing Speed [Default: 60 RPM]", None, None),
             "11": ("Run Homing", None, None),
+            "12": ("Read Motor Operating Status", 0xF1, None),
         }
 
-    def send_can_message(self, can_id, data, dlc_value):
-        # STX(1) + Type(1) +DLC(1) + Flags(1) + ID(4) + Data(8) + Checksum(1) + ETX(1) = Total 18byte
+        self.RESPONSE_PATTERNS = {
+            "setting": {
+                0x00: "Failed",
+                0x01: "Success",
+            },
+            "motion": {
+                0x00: "Failed",
+                0x01: "Running",
+                0x02: "Run Complete",
+                0x03: "Stopped by Limit Switch",
+                0x05: "Sync Data Received",
+            },
+        }
 
-        packet = bytearray(18)
-        packet[0] = 0x02            # STX
-        packet[1] = 0x00            # Type: Message Packet
-        packet[2] = dlc_value       # DLC (Range: 0~8)
-        packet[3] = 0x00            # Flags: CAN Standard Data Frame
-    
-        # ID Setting
-        packet[4:8] = can_id.to_bytes(4, 'little')
+        # Maps command codes to their response pattern
+        self.CMD_RESPONSE_TYPE = {
+            # Settings (from SETTINGS_MAP + internal usage)
+            0x82: "setting", 0x83: "setting", 0x84: "setting",
+            0x85: "setting", 0x86: "setting", 0x8A: "setting",
+            0x8C: "setting", 0x90: "setting", 0x92: "setting",
+            0xF3: "setting",
+            # Motion (from COMMAND_MAP + internal usage)
+            0x91: "motion", 0xF4: "motion", 0xF5: "motion",
+            0xF6: "motion",
+        }
 
-        # Data for Motor Driver
-        for i in range(min(len(data), 8)):
-            packet[8+i] = data[i]
-    
-        # Checksum Calculation
-        packet[16] = sum(packet[1:16]) & 0xFF
-        packet[17] = 0x03           # ETX
-
-        self.dev.write(bytes(packet))
-        print(f"[SENT] CAN ID {can_id}: {data.hex().upper()}")
-
-    def create_motor_packet(self, can_id, cmd_code, data_values=None):
+    def create_motor_packet(self, can_id, cmd_code, data_list=None):
     
         # 0. If data is none, return empty list. Else, use input list
-        if data_values is None:
-            data_values = []
+        if data_list is None:
+            data_list = []
     
         # 1. DLC Calculation: Command + Data + CRC
-        dlc = 1 + len(data_values) + 1
+        dlc = 1 + len(data_list) + 1
         if dlc > 8:
-            print(f"[ERROR] DLC Exceed Maximum (8). Current: {dlc}")
+            print(f"[INPUT] DLC Exceed Maximum (8). Current: {dlc}")
             return None, None
 
         # 2. Internal CRC Calculation 
-        total_sum = can_id + cmd_code + sum(data_values)
+        total_sum = can_id + cmd_code + sum(data_list)
         internal_crc = total_sum & 0xFF
 
         # 3. packet Construction
-        packet_content = [cmd_code] + data_values + [internal_crc]
+        packet_content = [cmd_code] + data_list + [internal_crc]
         while len(packet_content) < 8:
             packet_content.append(0x00)
 
         # print(bytearray(packet_content).hex().upper())
         # print(dlc)
         return bytearray(packet_content), dlc
+    
+    def send_can_message(self, can_id, packet_content, dlc):
+        # STX(1) + Type(1) +DLC(1) + Flags(1) + ID(4) + Data(8) + Checksum(1) + ETX(1) = Total 18byte
+
+        packet = bytearray(18)
+        packet[0] = 0x02            # STX
+        packet[1] = 0x00            # Type: Message Packet
+        packet[2] = dlc             # DLC (Range: 0~8)
+        packet[3] = 0x00            # Flags: CAN Standard Data Frame
+    
+        # ID Setting
+        packet[4:8] = can_id.to_bytes(4, 'little') # Endian Format
+
+        # Data for Motor Driver
+        for i in range(min(len(packet_content), 8)):
+            packet[8+i] = packet_content[i]
+    
+        packet[16] = sum(packet[1:16]) & 0xFF # CRC
+        packet[17] = 0x03 # ETX
+
+        self.dev.write(bytes(packet))
+        print(f"[SENT] CAN ID {can_id}: {packet_content.hex().upper()}")
 
     def send_motor(self, can_id, cmd_code, *data_values):
-    
-        values_list = list(data_values)
-        motor_data, dlc = self.create_motor_packet(can_id, cmd_code, values_list)
+
+        data_list = list(data_values)
+        motor_data, dlc = self.create_motor_packet(can_id, cmd_code, data_list)
         if motor_data is None:
-            return
+            return None
         self.dev.purge(1)
         self.send_can_message(can_id, motor_data, dlc)
-
-        cmd_name = next(
-            (name for _, (name, code, _) in self.COMMAND_MAP.items() if code == cmd_code),
-            f"Unknown(0x{cmd_code:02X})"
-        )
 
         time.sleep(0.05)    # Motor Response Stand by
         response = self.dev.read(18)
 
         if len(response) == 18:
             status_byte = response[9]
-
-            if status_byte == 0x00:
-                print(f"[FAIL] Motor Rejected the Command: {cmd_name}")
+            resp_type = self.CMD_RESPONSE_TYPE.get(cmd_code)
+            if resp_type:
+                pattern = self.RESPONSE_PATTERNS[resp_type]
+                status_text = pattern.get(status_byte, f"Unknown (0x{status_byte:02X})")
             else:
-                print(f"[STATUS] '{cmd_name}' Response Code: 0x{status_byte:02X}")
-            
-            # motor_reply = response[8:16]
-            # print(f"   Raw Reply: {motor_reply.hex().upper()}")
+                status_text = f"0x{status_byte:02X}"
+            print(f"[RESP] 0x{cmd_code:02X}: {status_text}")
+            return status_byte
 
         else:
-            print(f"[TIMEOUT] No Response for {cmd_name}")
+            print(f"[TIMEOUT] No Response for 0x{cmd_code:02X}")
+            return None
 
-    STATUS_MAP = {
-        0x00: "Failed",
-        0x01: "Running...",
-        0x02: "Run Complete",
-        0x03: "Stopped by Limit Switch",
-        0x05: "Sync Data Received",
-    }
+    def reset_after_limit(self, can_id):
+        print("[LIMIT] Resetting motor after limit switch stop...")
+        self.send_motor(can_id, 0xF3, 0x00)  # Disable
+        self.send_motor(can_id, 0xF3, 0x01)  # Re-enable
+        time.sleep(0.3)
+        self.dev.purge(1)
+        self._retry_after_limit = True
+        print("[LIMIT] Motor re-enabled. Ready to move.")
 
-    def wait_response(self, timeout=5):
+    def wait_response(self, can_id=None, timeout=5):
         print("[WAIT] Waiting for Motor Response...")
         start = time.time()
         while time.time() - start < timeout:
@@ -157,9 +179,12 @@ class MKSServo:
             if len(response) == 18:
                 cmd = response[8]
                 status = response[9]
-                status_text = self.STATUS_MAP.get(status, f"Unknown (0x{status:02X})")
+                motion_pattern = self.RESPONSE_PATTERNS["motion"]
+                status_text = motion_pattern.get(status, f"Unknown (0x{status:02X})")
                 print(f"[RECV] CMD: 0x{cmd:02X}, Status: {status_text}")
                 if status != 0x01:  # 0x01 = still running, keep waiting
+                    if status == 0x03 and can_id is not None:
+                        self.reset_after_limit(can_id)
                     return status
             time.sleep(0.1)
         print("[TIMEOUT] No Response Received.")
@@ -168,30 +193,22 @@ class MKSServo:
 
     def setup_motor(self, can_id):
         setup_commands = [
-            ("Set SR_vFOC Mode", 0x82, [0x05]),
-            ("Set Slave Response (XX=1, YY=1)", 0x8C, [0x01, 0x01]),
-            ("Set CAN Rate 1M", 0x8A, [0x03]),
+            (0x82, [0x05]),        # Set SR_vFOC Mode
+            (0x8C, [0x01, 0x01]),  # Set Slave Response (XX=1, YY=1)
+            (0x8A, [0x03]),        # Set CAN Rate 1M
         ]
 
         all_ok = True
-        for name, cmd, data in setup_commands:
-            self.dev.purge(1)
-            motor_data, dlc = self.create_motor_packet(can_id, cmd, data)
-            self.send_can_message(can_id, motor_data, dlc)
-            time.sleep(0.05)
-            response = self.dev.read(18)
-
-            if len(response) == 18 and response[9] == 0x01:
-                print(f"[OK] {name}")
-            else:
-                print(f"[FAIL] {name}")
+        for cmd, data in setup_commands:
+            status = self.send_motor(can_id, cmd, *data)
+            if status != 0x01:
                 all_ok = False
-        
+
         if all_ok:
             print("[SETUP] All Settings Applied.")
         else:
             print("[SETUP] Some Settings Failed.")
-        
+
         return all_ok
 
     def home_motor(self, can_id, home_speed=60):
@@ -201,7 +218,7 @@ class MKSServo:
 
         # 1. Set homing params (90H)
         #    homeTrig=0x00 (Low level), homeDir=0x01 (CCW),
-        #    homeSpeed (uint16_t), EndLimit=0x00 (disable limit),
+        #    homeSpeed (uint16_t), EndLimit=0x00 (disable during homing),
         #    hm_mode=0x00 (origin switch homing)
         #
         #    NOTE: Dir is INVERTED on this motor setup.
@@ -221,6 +238,13 @@ class MKSServo:
 
         if status == 0x02:
             print("[HOME] Homing Complete. Zero point set.")
+
+            # 4. Enable limit switches with inverted homeDir (no second 91H)
+            #    homeDir=0x00 here to fix limit direction mapping
+            #    (homing used 0x01, but limit direction is inverted)
+            self.send_motor(can_id, 0x90, 0x00, 0x00, speed_hi, speed_lo, 0x01, 0x00)
+            self._retry_after_limit = True
+            print("[HOME] Limit switches enabled.")
         elif status == 0x00:
             print("[HOME] Homing Failed. Check switch wiring.")
         else:
@@ -371,7 +395,6 @@ class MKSServo:
 
             # Options submenu
             if isinstance(options, dict):
-                print("    (* = default)")
                 for k, (desc, _) in options.items():
                     print(f"    {k}. {desc}")
                 sub = safe_input(">> Choose Option: ")
@@ -454,7 +477,7 @@ class MKSServo:
                             # 91H: Hm Restoration, F6H: Speed Control
                             # F4H: Coord relativ running, F5H: Coord abs running
                             # FDH: Pulse relativ running, FEH: Pulse abs running
-                            self.wait_response()
+                            self.wait_response(can_id=id_input)
                         continue
                     except ValueError:
                         print("[INPUT] Invalid Hex Format.")
@@ -509,7 +532,15 @@ class MKSServo:
                     # 91H: Hm Restoration, F6H: Speed Control
                     # F4H: Coord relativ running, F5H: Coord abs running
                     # FDH: Pulse relativ running, FEH: Pulse abs running
-                    self.wait_response()
+                    result = self.wait_response(can_id=id_input)
+
+                    # Auto-retry once if timed out after limit reset
+                    if result is None and self._retry_after_limit:
+                        self._retry_after_limit = False
+                        print("[RETRY] Re-sending command after limit reset...")
+                        self.dev.purge(1)
+                        self.send_motor(id_input, cmd_code, *data_values)
+                        self.wait_response(can_id=id_input)
 
         except StopIteration:
             pass
