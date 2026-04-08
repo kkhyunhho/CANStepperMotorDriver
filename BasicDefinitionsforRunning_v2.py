@@ -25,7 +25,7 @@ MAX_SPEED_RPM = 3000
 MAX_ACCEL = 255
 MAX_COORD = 8388607         # int24 max
 MAX_TRAVEL_MM = 450         # Ball screw physical limit
-MAX_WAIT_SEC = 250         # Max wait for motor response (1% speed full travel ≈ 240s)
+MAX_WAIT_SEC = 10   # 250   # Max wait for motor response (1% speed full travel ≈ 240s)
 
 # Commands that trigger async motor responses (motion in progress -> complete)
 MOTION_CMDS = {0x91, 0xF4, 0xF5, 0xF6, 0xFD, 0xFE}
@@ -84,7 +84,6 @@ class MKSMotor:
     def __init__(self, dev, can_id=0x01):
         self.dev = dev
         self.can_id = can_id
-        self._retry_after_limit = False
 
     # ---- Low-level: CAN packet over USB2CAN ----
 
@@ -128,9 +127,15 @@ class MKSMotor:
                 print("[TX] Broadcast -- no response expected")
             return None
 
-        # Read immediate response (should always arrive -- we use full response mode)
-        time.sleep(0.05)
-        resp = self.dev.read(18)
+        # Retry a few times with increasing delay in case of USB/CAN latency
+        resp = b''
+        for attempt in range(5):
+            time.sleep(0.05)
+            resp = self.dev.read(18)
+            if len(resp) == 18:
+                break
+            self.dev.purge(1)
+
         if len(resp) != 18:
             raise ConnectionError(f"No response for 0x{cmd:02X} -- check CAN wiring, power, and bitrate")
 
@@ -143,7 +148,8 @@ class MKSMotor:
             print(f"[RX] {table.get(status, f'Unknown 0x{status:02X}')}")
         return status
 
-    def wait(self, auto_reset=True):
+
+    def wait(self):
         """Wait for async motor response (motion complete, limit hit, etc.).
 
         Uses MAX_WAIT_SEC. Resets each time a Running response arrives.
@@ -159,24 +165,29 @@ class MKSMotor:
                 if status == 0x01:      # Still running -- keep waiting
                     deadline = time.time() + MAX_WAIT_SEC
                     continue
-                if status == 0x03 and auto_reset:
-                    self._handle_limit_stop()
+                if status == 0x03:
+                    print("[LIMIT] Motor stopped by limit switch")
+                    # Re-enable motor and clear buffer so next command works
+                    self.send(0xF3, 0x00, silent=True)  # Disable
+                    self.send(0xF3, 0x01, silent=True)  # Enable
+                    time.sleep(0.5)
+                    while len(self.dev.read(18)) == 18:
+                        pass
+                    self.dev.purge(1)
+                    # Dummy move: firmware ignores first motion after re-enable
+                    # Use F4H (relative) with tiny distance so it works regardless
+                    # of current position
+                    coord = int(0.01 / MM_PER_TURN * ENCODER_PER_TURN)
+                    dummy = int16_bytes(300) + [0] + int24_bytes(coord)
+                    self.send(0xF4, *dummy, silent=True)
+                    time.sleep(0.5)
+                    self.dev.purge(1)
                 return status
 
             time.sleep(0.1)
 
         print("[ERROR] Motor not responding -- check power, wiring, and CAN connection")
         return None
-
-    def _handle_limit_stop(self):
-        """Re-enable motor after limit switch stop."""
-        print("[LIMIT] Re-enabling motor...")
-        self.send(0xF3, 0x00, silent=True)  # Disable
-        self.send(0xF3, 0x01, silent=True)  # Enable
-        time.sleep(0.3)
-        self.dev.purge(1)
-        self._retry_after_limit = True
-        print("[LIMIT] Ready")
 
     # ---- Setup & Homing ----
 
@@ -204,7 +215,7 @@ class MKSMotor:
         Manual says 0x00=CW, 0x01=CCW, but actual movement is opposite.
         All direction values in this method are swapped accordingly.
         """
-        print(f"\n{'='*40}\nHOMING (speed={speed_rpm} RPM)\n{'='*40}")
+        print(f"{'='*40}\nHOMING (speed={speed_rpm} RPM)\n{'='*40}")
         spd = int16_bytes(speed_rpm)
 
         # Set homing params: trigger=Low, dir=0x01(=actual CW), speed, no limit, origin switch
@@ -213,14 +224,20 @@ class MKSMotor:
         # Execute homing
         self.send(0x91)
         print("Moving toward origin switch...")
-        status = self.wait(auto_reset=False)
+        status = self.wait()
 
         if status == 0x02:
             print("Homing complete. Zero point set.")
-            # Enable limit switches, dir=0x00(=actual CCW) to match inverted mapping
-            self.send(0x90, 0x00, 0x00, *spd, 0x01, 0x00)
-            self._retry_after_limit = True
+            # Enable limit switches, dir=0x01 to match homing direction
+            self.send(0x90, 0x00, 0x01, *spd, 0x01, 0x00)
             print("Limit switches enabled.")
+
+            # Dummy move: firmware ignores first motion after limit enable/re-enable
+            coord = int(0.01 / MM_PER_TURN * ENCODER_PER_TURN)
+            dummy = int16_bytes(300) + [0] + int24_bytes(coord)
+            self.send(0xF5, *dummy, silent=True)
+            time.sleep(0.5)
+            self.dev.purge(1)
         elif status == 0x00:
             print("Homing FAILED. Check switch wiring.")
         else:
@@ -244,33 +261,11 @@ class MKSMotor:
         self._send_and_wait(0xF5, data)
 
     def _send_and_wait(self, cmd, data):
-        """Send motion command, wait for completion. Auto-retry if on limit switch.
-
-        Handles two limit switch scenarios:
-        1. send() returns non-0x01: motor refused to start (on limit)
-        2. send() returns 0x01 but wait() gets 0x03: motor started then hit limit
-        """
+        """Send motion command and wait for completion."""
         initial = self.send(cmd, *data)
 
         if initial == 0x01:
-            result = self.wait()
-            # Scenario 2: started but immediately hit limit
-            if result == 0x03 and self._retry_after_limit:
-                self._retry_after_limit = False
-                print("[RETRY] Hit limit after start, retrying...")
-                initial = self.send(cmd, *data)
-                if initial == 0x01:
-                    return self.wait()
-            return result
-
-        # Scenario 1: motor refused to start
-        if self._retry_after_limit:
-            self._retry_after_limit = False
-            print("[RETRY] Motor didn't start, re-enabling and retrying...")
-            self._handle_limit_stop()
-            initial = self.send(cmd, *data)
-            if initial == 0x01:
-                return self.wait()
+            return self.wait()
 
         if initial:
             print(f"[ERROR] Motor failed to start (status=0x{initial:02X})")
@@ -386,18 +381,53 @@ class MKSMotor:
 
 # --- Entry Point ---
 
+def open_device():
+    """Open and configure FTDI USB2CAN device."""
+    dev = ftdi.open(0)
+    dev.setBitMode(0xFF, 0x40)  # FT245 synchronous FIFO mode
+    dev.setTimeouts(100, 100)
+    dev.purge(1 | 2)
+    time.sleep(0.1)
+    return dev
+
+
+def reset_device(dev):
+    """Reset FTDI device to recover from CAN Bus-Off state."""
+    print("[RESET] Resetting USB2CAN adapter...")
+    try:
+        dev.setBitMode(0x00, 0x00)  # Reset mode
+        time.sleep(0.3)
+        dev.setBitMode(0xFF, 0x40)  # Back to FIFO mode
+        dev.purge(1 | 2)
+        time.sleep(0.3)
+        print("[RESET] Done")
+    except Exception:
+        print("[RESET] Failed -- try unplugging USB")
+
+
 if __name__ == "__main__":
     dev = None
     try:
-        dev = ftdi.open(0)
-        dev.setBitMode(0xFF, 0x40)  # FT245 synchronous FIFO mode
-        dev.setTimeouts(100, 100)
+        dev = open_device()
         motor = MKSMotor(dev, can_id=0x01)
 
-        if motor.setup():
-            motor.home()
+        # Try setup with automatic recovery on failure
+        for attempt in range(3):
+            try:
+                if motor.setup():
+                    motor.home()
+                    break
+                else:
+                    print("[WARN] Setup failed")
+                    if attempt < 2:
+                        reset_device(dev)
+            except ConnectionError as e:
+                print(f"[ERROR] {e}")
+                if attempt < 2:
+                    reset_device(dev)
         else:
-            print("[WARN] Setup failed -- entering menu for manual setup")
+            print("[WARN] Setup failed after 3 attempts -- entering menu")
+
         motor.interactive_menu()
 
     except Exception as e:
