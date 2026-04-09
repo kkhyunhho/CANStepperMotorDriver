@@ -11,7 +11,7 @@
 #   2. send / wait       - Core CAN communication
 #   3. setup / home      - Motor initialization
 #   4. move_to           - High-level motion commands
-#   5. interactive_menu  - User interface
+#   5. Motor control     - enable, disable, set_zero, read_status
 
 import time
 
@@ -286,6 +286,11 @@ class MKSMotor:
         failure, or limit hit. Timeout resets each
         time a "Running" response arrives.
 
+        On limit stop (0x03), the MKS firmware
+        ignores the first motion command after a
+        limit stop, so this dummy consumes that
+        skip and restores normal operation.
+
         Returns:
             Status byte (0x02=complete, 0x03=limit,
             etc.), or None on timeout.
@@ -445,11 +450,7 @@ class MKSMotor:
             f" coord=0x{coord:06X})"
         )
 
-        self._send_and_wait(0xF5, data)
-
-    def _send_and_wait(self, cmd, data):
-        """Send motion command and wait for completion."""
-        initial = self._send(cmd, *data)
+        initial = self._send(0xF5, *data)
 
         if initial == 0x01:
             return self._wait()
@@ -463,122 +464,61 @@ class MKSMotor:
             print("[ERROR] No response")
         return initial
 
-    # --- Interactive Menu ---
+    # --- Manual command ---
 
-    def interactive_menu(self):
-        """Run the text-based motor control interface.
+    def manual_send(self, cmd, *data):
+        """Send a raw CAN command to the motor.
 
-        Loops until the user types 'exit'.
+        For motion commands (e.g. 0xF5), waits for
+        completion automatically.
+
+        Args:
+            cmd: MKS command code in hex (e.g. 0xF5).
+            *data: Variable-length data bytes.
+
+        Returns:
+            Status byte from motor response.
         """
-        while True:
-            try:
-                header = (
-                    f'{"="*40}\n'
-                    f'  Motor Control  |'
-                    f'  CAN ID: 0x{self.can_id:02X}\n'
-                    f'{"="*40}'
-                )
-                print(header)
-                print("  1. Move to position (mm)")
-                print("  2. Settings")
-                print("  3. Manual command (hex)")
-                print("  ────────────────────────")
-                print("  0. Re-run setup")
-                print("  exit. Quit")
+        if cmd in self.motion_cmds:
+            initial = self._send(cmd, *data)
+            if initial == 0x01:
+                return self._wait()
+            return initial
+        return self._send(cmd, *data)
 
-                choice = input(">> ").strip()
+    # --- Motor control ---
 
-                if choice == "1":
-                    self._menu_move_to()
-                elif choice == "2":
-                    self._menu_settings()
-                elif choice == "3":
-                    self._menu_manual()
-                elif choice == "0":
-                    self.setup()
-                elif choice.lower() == "exit":
-                    break
-                else:
-                    print("[INPUT] Invalid choice")
+    def set_zero(self):
+        """Set current position as zero point.
 
-            except Exception as e:
-                print(f"\n[ERROR] {e}")
+        Returns:
+            Status byte from motor response.
+        """
+        return self._send(0x92)
 
-    def _menu_move_to(self):
-        print(
-            "  Format: [Speed%] [Accel%]"
-            " [Distance_mm]"
-        )
-        print("  Example: 20 10 3.75")
-        raw = input(">> ")
-        try:
-            parts = raw.split()
-            self.move_to(
-                mm=float(parts[2]),
-                speed_pct=float(parts[0]),
-                accel_pct=float(parts[1]),
-            )
-        except (IndexError, ValueError) as e:
-            print(f"[INPUT] {e}")
+    def enable(self):
+        """Enable motor (energize coils).
 
-    def _menu_settings(self):
-        settings = [
-            ("Run homing", lambda: self.home(
-                speed_rpm=int(
-                    input("  Homing speed RPM [90]: ")
-                    or "90"
-                ))),
-            ("Set zero point",
-             lambda: self._send(0x92)),
-            ("Enable motor",
-             lambda: self._send(0xF3, 0x01)),
-            ("Disable motor",
-             lambda: self._send(0xF3, 0x00)),
-            ("Read status",
-             lambda: self._send(0xF1)),
-        ]
-        while True:
-            print(
-                f'\n{"-"*40}\n'
-                f'  Settings\n'
-                f'{"-"*40}'
-            )
-            for i, (name, _) in enumerate(settings, 1):
-                print(f"  {i}. {name}")
-            print("  0. Back")
+        Returns:
+            Status byte from motor response.
+        """
+        return self._send(0xF3, 0x01)
 
-            choice = input(">> ").strip()
-            if choice == "0":
-                return
-            try:
-                idx = int(choice) - 1
-                if 0 <= idx < len(settings):
-                    settings[idx][1]()
-                else:
-                    print("[INPUT] Invalid choice")
-            except (ValueError, Exception) as e:
-                print(f"[ERROR] {e}")
+    def disable(self):
+        """Disable motor (de-energize coils).
 
-    def _menu_manual(self):
-        try:
-            cmd = int(
-                input("  Command code (hex): "), 16
-            )
-            d_raw = input(
-                "  Data bytes (hex, or Enter): "
-            )
-            if d_raw:
-                data = [
-                    int(x, 16) for x in d_raw.split()
-                ]
-            else:
-                data = []
-            if cmd in self.motion_cmds:
-                self._send_and_wait(cmd, data)
-            else:
-                self._send(cmd, *data)
-        except ValueError:
-            print("[INPUT] Invalid hex")
+        Returns:
+            Status byte from motor response.
+        """
+        return self._send(0xF3, 0x00)
+
+    def read_status(self):
+        """Read motor status.
+
+        Returns:
+            Status byte from motor response.
+        """
+        return self._send(0xF1)
 
     # --- Entry Point ---
 
@@ -588,6 +528,7 @@ class MKSMotor:
         port=0, can_id=0x01,
     ):
         """Open, setup, home, move, and close.
+        It can be modified as user's purpose.
 
         Single entry point for complete motor operation.
 
