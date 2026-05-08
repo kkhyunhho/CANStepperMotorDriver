@@ -24,7 +24,7 @@ class MKSMotor:
     # --- Constants ---
 
     # Mechanical / motor limits
-    _mm_per_turn = 3.75
+    _mm_per_turn = 4
     _encoder_per_turn = 16384
     _max_speed_rpm = 3000
     _max_accel = 255
@@ -391,7 +391,7 @@ class MKSMotor:
             print("[SETUP] FAILED")
         return ok
 
-    def home(self, speed_rpm=90):
+    def home(self, speed_rpm=180):
         """Run homing sequence and enable limit switches.
 
         Finds the origin switch, sets the zero point,
@@ -488,6 +488,22 @@ class MKSMotor:
             print("[ERROR] No response")
         return initial
 
+    def run(self, moves, barrier=None):
+        """Execute a move sequence.
+
+        Args:
+            moves: List of argument tuples passed
+                to move_to() in order.
+            barrier: Optional threading.Barrier.
+                If provided, all motors wait until
+                each has called barrier.wait() before
+                any begins moving.
+        """
+        if barrier is not None:
+            barrier.wait()
+        for args in moves:
+            self.move_to(*args)
+
     # --- Manual command ---
 
     def manual_send(self, cmd, *data):
@@ -578,4 +594,4 @@ class MKSMotor:
 
 
 if __name__ == "__main__":
-    MKSMotor.main(mm=100, speed_pct=20, accel_pct=10)
+    MKSMotor.main(mm=100, speed_pct=25, accel_pct=10)
