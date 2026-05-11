@@ -247,11 +247,11 @@ class MKSMotor:
         self.dev.write(bytes(packet))
         if not silent:
             data_hex = bytes(data_bytes).hex().upper() or "(no data)"
-            print(f"[M{self.can_id:02X}][TX] 0x{cmd:02X} {data_hex}")
+            print(f"[TX] 0x{cmd:02X} {data_hex}")
 
         if self.can_id == 0x00:
             if not silent:
-                print(f"[M{self.can_id:02X}][TX] Broadcast -- no response expected")
+                print("[TX] Broadcast -- no response expected")
             return None
 
         resp = b""
@@ -274,7 +274,7 @@ class MKSMotor:
             else:
                 table = self._setting_status
             status_label = table.get(status, f"Unknown 0x{status:02X}")
-            print(f"[M{self.can_id:02X}][RX] {status_label}")
+            print(f"[RX] {status_label}")
         return status
 
     def _wait(self):
@@ -300,13 +300,13 @@ class MKSMotor:
             if len(resp) == 18:
                 status = resp[9]
                 label = self._motion_status.get(status, f"0x{status:02X}")
-                print(f"[M{self.can_id:02X}][RX] {label}")
+                print(f"[RX] {label}")
 
                 if status == 0x01:
                     deadline = time.time() + self._max_wait_sec
                     continue
                 if status == 0x03:
-                    print(f"[M{self.can_id:02X}][LIMIT] Motor stopped by limit switch")
+                    print("[LIMIT] Motor stopped by limit switch")
                     time.sleep(self._limit_recover_delay_s)
                     self.dev.purge(1)
                     coord = int(
@@ -326,7 +326,7 @@ class MKSMotor:
 
             time.sleep(0.1)
 
-        print(f"[M{self.can_id:02X}][ERROR] Motor not responding -- check power, wiring, and CAN")
+        print("[ERROR] Motor not responding -- check power, wiring, and CAN")
         return None
 
     # --- Setup & Homing ---
