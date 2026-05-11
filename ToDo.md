@@ -108,6 +108,35 @@ motor each log line belongs to by prefixing with the CAN ID.
 
 ---
 
+## Task: Create running_test_xz.py (Z sync + X independent)
+
+**Date**: 2026-05-11
+**Target**: `running_test_xz.py` (신규 파일)
+**Purpose**: Z축 2개 모터를 threading으로 동기화하고,
+X축 1개 모터를 순차적으로 제어하는 시퀀스 구현.
+
+### 동작 순서
+1. Z 모터 2개 setup + home (병렬)
+2. X 모터 setup + home (순차)
+3. Z 모터 2개 → 200mm 이동 (동기)
+4. X 모터 → 목표 지점 이동
+5. Z 모터 2개 → 목표 지점으로 하강 (동기)
+
+### 포트 할당 (가정)
+- Z motor A : port 0
+- Z motor B : port 1
+- X motor   : port 2
+
+### 구현 방식
+- Z 동기 이동은 `threading.Barrier(2)` + 헬퍼 함수로 반복 제거
+- 이동 파라미터(mm, speed_pct, accel_pct)는 파일 상단 상수로 정의
+
+- [ ] `running_test_xz.py` 작성
+- [ ] GitHub 이슈 등록
+- [ ] 커밋 & 푸시
+
+---
+
 ### 5. Out of scope
 
 - No behavioral changes; only renames, constant extraction,
