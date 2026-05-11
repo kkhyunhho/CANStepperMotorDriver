@@ -82,6 +82,20 @@ to match CLAUDE.md §1 constant convention.
       User to run `ruff check` / `ruff format --check` locally
       before commit.)
 
+---
+
+## Task: Correct mm/turn value to 5 in code and docs
+
+**Date**: 2026-05-11
+**Target**: `mks_motor.py`, `README.md`
+**Purpose**: Align the mechanical pitch constant with the
+actual hardware spec (5 mm/turn ball screw).
+
+- [x] `mks_motor.py`: `_mm_per_turn = 4` → `_mm_per_turn = 5`
+- [x] `README.md`: Hardware table `3.75 mm/turn` → `5 mm/turn`
+
+---
+
 ### 5. Out of scope
 
 - No behavioral changes; only renames, constant extraction,

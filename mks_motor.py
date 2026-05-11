@@ -24,7 +24,7 @@ class MKSMotor:
     # --- Constants ---
 
     # Mechanical / motor limits
-    _mm_per_turn = 4
+    _mm_per_turn = 5
     _encoder_per_turn = 16384
     _max_speed_rpm = 3000
     _max_accel = 255

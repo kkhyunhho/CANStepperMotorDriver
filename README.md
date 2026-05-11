@@ -14,7 +14,7 @@ only.
 |------|--------|
 | Motor | MKS SERVO57D (CAN stepper) |
 | Adapter | USB2CAN-FIFO (FTDI FT245) |
-| Mechanics | Ball screw, 3.75 mm/turn |
+| Mechanics | Ball screw, 5 mm/turn |
 | Travel | 0 - 450 mm |
 
 ## Installation
