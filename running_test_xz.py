@@ -38,13 +38,13 @@ try:
     motor_x.setup()
     motor_x.home()
 
-    # Step 3: Z → Z_RISE_MM
+    # Step 3: Z → Z_ASCEND_MM
     MKSMotor.move_sync([motor_z_a, motor_z_b], [(Z_ASCEND_MM, SPEED_PCT, ACCEL_PCT)])
 
-    # Step 4: X → X_TARGET_MM
+    # Step 4: X → X_TARGET_MM_1
     motor_x.move_to(X_TARGET_MM_1, SPEED_PCT, ACCEL_PCT)
 
-    # Step 5: Z → Z_TARGET_MM
+    # Step 5: Z → Z_DESCEND_MM
     MKSMotor.move_sync([motor_z_a, motor_z_b], [(Z_DESCEND_MM, SPEED_PCT, ACCEL_PCT)])
 
 finally:
