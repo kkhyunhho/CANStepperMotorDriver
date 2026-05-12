@@ -435,19 +435,6 @@ class MKSMotor:
         return initial
 
     @staticmethod
-    def _move_with_barrier(motor, moves, barrier):
-        """Wait at barrier then execute a move sequence.
-
-        Args:
-            motor: MKSMotor instance to move.
-            moves: List of argument tuples passed to move_to().
-            barrier: threading.Barrier to synchronize start.
-        """
-        barrier.wait()
-        for args in moves:
-            motor.move_to(*args)
-
-    @staticmethod
     def move_sync(motors, moves, barrier=None):
         """Run the same move sequence on multiple motors in sync.
 
@@ -465,8 +452,10 @@ class MKSMotor:
             barrier = threading.Barrier(len(motors))
         threads = [
             threading.Thread(
-                target=MKSMotor._move_with_barrier,
-                args=(m, moves, barrier),
+                target=lambda m=m: (
+                    barrier.wait(),
+                    [m.move_to(*args) for args in moves],
+                )
             )
             for m in motors
         ]
