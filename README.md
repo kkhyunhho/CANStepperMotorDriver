@@ -70,6 +70,7 @@ called on a motor object (e.g. `motor.setup()`).
 | `setup()` | Apply default motor settings |
 | `home(speed_rpm)` | Run homing sequence and enable limit switches |
 | `move_to(mm, speed_pct, accel_pct)` | Move to absolute position in mm |
+| `run_sync(motors, moves)` | Move multiple motors in sync |
 | `enable()` | Energize motor coils |
 | `disable()` | De-energize motor coils |
 | `set_zero()` | Set current position as the zero point |

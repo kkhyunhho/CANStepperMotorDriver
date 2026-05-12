@@ -434,22 +434,6 @@ class MKSMotor:
             print("[ERROR] No response")
         return initial
 
-    def run(self, moves, barrier=None):
-        """Execute a move sequence.
-
-        Args:
-            moves: List of argument tuples passed
-                to move_to() in order.
-            barrier: Optional threading.Barrier.
-                If provided, all motors wait until
-                each has called barrier.wait() before
-                any begins moving.
-        """
-        if barrier is not None:
-            barrier.wait()
-        for args in moves:
-            self.move_to(*args)
-
     @staticmethod
     def run_sync(motors, moves):
         """Run the same move sequence on multiple motors in sync.
@@ -463,8 +447,14 @@ class MKSMotor:
                 in order.
         """
         barrier = threading.Barrier(len(motors))
+
+        def _run(motor):
+            barrier.wait()
+            for args in moves:
+                motor.move_to(*args)
+
         threads = [
-            threading.Thread(target=m.run, args=(moves, barrier))
+            threading.Thread(target=_run, args=(m,))
             for m in motors
         ]
         for t in threads:
