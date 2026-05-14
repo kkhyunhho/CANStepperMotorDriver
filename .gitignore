@@ -1,1 +1,8 @@
 /Basic_Definitions_for_Running.py
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Claude Code local settings
+.claude/
