@@ -27,6 +27,38 @@ The FTDI **D2XX** driver must also be installed on the
 system. On Windows, this usually comes with the FTDI
 adapter drivers.
 
+## Hardware setup
+
+Before running the driver, the motor and adapter must be
+configured. Otherwise the CAN link will not come up.
+
+### CAN baud rate
+
+The USB2CAN-FIFO adapter runs at **1 Mbps**. The motor's
+CAN baud rate must be set to the same value through the
+on-motor menu. If the rates do not match, no frames are
+received.
+
+### DIP switches
+
+Three DIP switches sit under the display on the right-hand
+side of the motor. Push all three to the **left** position.
+This:
+
+- enables the end-stop inputs to work reliably, and
+- removes the need to wire external power to the
+  USB2CAN adapter (the motor side powers the bus).
+
+### Cable connection order
+
+Connect the cables in this order, every time:
+
+1. **Power cable** first.
+2. **CAN (communication) cable** second.
+
+If the CAN cable is plugged in before power, the link will
+not come up.
+
 ## Usage
 
 ### Quick run
