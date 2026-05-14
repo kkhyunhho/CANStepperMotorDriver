@@ -13,7 +13,6 @@
 #   4. move_to           - High-level motion commands
 #   5. Motor control     - enable, disable, set_zero, read_status
 
-import threading
 import time
 
 import ftd2xx as ftdi
@@ -25,7 +24,7 @@ class MKSMotor:
     # --- Constants ---
 
     # Mechanical / motor limits
-    _mm_per_turn = 10
+    _mm_per_turn = 4
     _encoder_per_turn = 16384
     _max_speed_rpm = 3000
     _max_accel = 255
@@ -434,35 +433,21 @@ class MKSMotor:
             print("[ERROR] No response")
         return initial
 
-    @staticmethod
-    def move_sync(motors, moves, barrier=None):
-        """Run the same move sequence on multiple motors in sync.
-
-        All motors wait at a barrier before starting, so they
-        begin moving simultaneously regardless of thread scheduling.
+    def run(self, moves, barrier=None):
+        """Execute a move sequence.
 
         Args:
-            motors: List of MKSMotor instances to move together.
-            moves: List of argument tuples passed to move_to()
-                in order.
-            barrier: Optional threading.Barrier. If None, one is
-                created internally sized to len(motors).
+            moves: List of argument tuples passed
+                to move_to() in order.
+            barrier: Optional threading.Barrier.
+                If provided, all motors wait until
+                each has called barrier.wait() before
+                any begins moving.
         """
-        if barrier is None:
-            barrier = threading.Barrier(len(motors))
-        threads = [
-            threading.Thread(
-                target=lambda m=m: (
-                    barrier.wait(),
-                    [m.move_to(*args) for args in moves],
-                )
-            )
-            for m in motors
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        if barrier is not None:
+            barrier.wait()
+        for args in moves:
+            self.move_to(*args)
 
     # --- Manual command ---
 
